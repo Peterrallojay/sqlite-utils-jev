@@ -34,7 +34,7 @@ class PipelineTests(unittest.TestCase):
 
     def run_job(self, **kwargs):
         options = dict(key="id", text_columns=["body"], question=QUESTION, state=self.state,
-                       budget_usd=1, api_key="fake")
+                       budget_usd=1, api_key="fake", mode="isolated")
         options.update(kwargs)
         return classify_table(self.source, "tickets", **options)
 
@@ -105,7 +105,7 @@ class PipelineTests(unittest.TestCase):
                 INSERT INTO generated(id,body) VALUES(1,'Refund Please');""")
         classify_table(self.source, "generated", key="generated_key",
                        text_columns=["stored", "virtual"], question=QUESTION,
-                       state=self.state, budget_usd=1, api_key="fake")
+                       state=self.state, budget_usd=1, api_key="fake", mode="isolated")
         payload = json.loads(self.http.return_value.open.call_args.args[0].data)
         self.assertEqual(payload["state"], {"stored": "refund please", "virtual": "REFUND PLEASE"})
         self.assertEqual(self.saved()[0]["source_key"], "101")
@@ -126,6 +126,7 @@ class PipelineTests(unittest.TestCase):
                     request_hash,label,proposed_label,probability,confidence,status,
                     min_probability,min_confidence,processed_at FROM current_results;
                 DROP TABLE current_results;
+                DROP TABLE batch_inputs;
                 PRAGMA user_version=1;
                 COMMIT;""")
 
@@ -140,7 +141,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(summary["requests"], 0)
         self.assertEqual(status(self.state), totals)
         with closing(sqlite3.connect(self.state)) as db, db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(db.execute("SELECT * FROM attempts ORDER BY id").fetchall(), attempts)
         rows = self.saved()
         self.assertEqual(len(rows), 6)
@@ -171,7 +172,7 @@ class PipelineTests(unittest.TestCase):
         self.http.return_value.open.side_effect = [Response(json.dumps(RESPONSE).encode()), TimeoutError()]
         with self.assertRaises(JevError):
             self.run_job()
-        self.assertEqual(len(self.saved()), 1)
+        self.assertEqual({row["source_key"] for row in self.saved()}, {"1", "3"})
         with self.assertRaisesRegex(JevError, "Previous attempt"):
             self.run_job()
         self.assertEqual(self.http.return_value.open.call_count, 2)
@@ -215,7 +216,7 @@ class PipelineTests(unittest.TestCase):
             db.execute('CREATE TABLE "odd "" table" ("key value" TEXT, "text content" TEXT)')
             db.execute('INSERT INTO "odd "" table" VALUES(?,?)', ('a"1', 'refund'))
         classify_table(self.source, 'odd " table', key="key value", text_columns=["text content"],
-                       question=QUESTION, state=self.state, budget_usd=1, api_key="fake")
+                       question=QUESTION, state=self.state, budget_usd=1, api_key="fake", mode="isolated")
         self.assertEqual(json.loads(self.saved()[0]["source_key"]), 'a"1')
 
     def test_invalid_threshold_and_limit(self):
@@ -227,7 +228,7 @@ class PipelineTests(unittest.TestCase):
     def test_installed_plugin_cli_and_offline_rerun(self):
         runner = CliRunner()
         base = ["jev", "classify", str(self.source), "tickets", "--key", "id", "--text", "body",
-                "--question", str(self.question), "--state", str(self.state), "--budget-usd", "1"]
+                "--question", str(self.question), "--state", str(self.state), "--budget-usd", "1", "--mode", "isolated"]
         result = runner.invoke(cli, base, env={"TYPESAFE_API_KEY": "fake"})
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(json.loads(result.stdout)["requests"], 2)

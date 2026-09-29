@@ -56,7 +56,19 @@ The question is a single Choice question:
 
 Choose 2–255 categories with string or null descriptions. This first version supports category classification only. Instructions must be a nonempty string. Noul and Score are outside this release's scope.
 
-Repeat the same command to resume. Unchanged successful requests come from the journal. Changed text, question or pinned model produces a new request. Identical text under the same column names can share a response across rows. Empty or whitespace-only rows are recorded as `empty` without an API call.
+Repeat the same command against the same selected inputs to resume. Successful requests come from the journal. Empty or whitespace-only rows are recorded as `empty` before the paid batches, without an API call.
+
+### Automatic batching and progress
+
+Classification defaults to `--mode packed`: up to 40 distinct records share one request, with smaller batches when the serialized request would exceed 24,000 UTF-8 bytes. These are conservative package limits, not provider maximums. The entire selection is checked for oversized rows before any request is sent; no text is truncated. Identical records within a batch share one answer. The command shows completed rows, cached rows, new requests, accounted spending and remaining work on **stderr**. Its final **stdout** is JSON. Use `--quiet` to suppress progress.
+
+Packed records share model context. The generated questions point at explicit record paths, but packing can still change model answers. Compare packed and isolated decisions on representative data before relying on packed accuracy; no live accuracy or throughput benchmark has been run for this feature. [TypeSafe's context documentation](https://docs.typesafe.ai/models) describes the shared state and context limits.
+
+Use `--mode isolated` for one row per request, the original behavior. The Python API takes `mode="isolated"`. This mode also reuses existing single-row caches from earlier package versions.
+
+**Packed cache identity includes the whole request.** Changing one record re-evaluates its entire batch; changing selected rows, their ordering, or `--limit` can alter batch boundaries and require additional requests. Unchanged batches still reuse saved responses. Packed and isolated results have separate task identities and a `mode` column. Changing modes never silently reuses an answer produced in another context. Threshold changes require no new requests when the selection and mode stay the same.
+
+`cache_hits` counts reused requests, while `cached_rows` counts source rows recovered from them. `accounted_usd` includes estimated reported costs and unresolved reservations for the entire journal; it is not a provider invoice or a hard spending guarantee.
 
 Use `--limit 20` to start with the first 20 rows ordered by key. To filter a dataset, prepare a SQLite view and classify that view. The key must be a unique, non-null integer or string throughout the table/view. Selected columns must contain strings or nulls.
 
@@ -64,7 +76,7 @@ Use `--limit 20` to start with the first 20 rows ordered by key. To filter a dat
 
 ```sh
 sqlite-utils decisions.sqlite \
-  "select source_key_column, source_key, label, proposed_label, probability, confidence, status from results"
+  "select mode, source_key_column, source_key, label, proposed_label, probability, confidence, status from results"
 ```
 
 `source_key` is JSON-encoded to preserve integer versus string identities; use SQLite's `json_extract(source_key, '$')` to recover the original value.
@@ -77,8 +89,8 @@ sqlite-utils decisions.sqlite \
 | `confidence` | The model's separate distribution-derived confidence |
 | `status` | `accepted`, `abstained` or `empty` |
 | `source_db`, `source_table`, `source_key_column`, `source_key` | Origin of the input row, including the column used as its key |
-| `question_hash`, `model` | Identity of the classification task |
-| `request_hash` | Look up request, response and usage in `attempts`; retries can produce several attempts per hash |
+| `question_hash`, `model`, `mode` | Identity of the classification task, including packed versus isolated execution |
+| `request_hash`, `answer_key` | Find the exact request in `attempts` and the row's answer within its response; retries can produce several attempts per hash |
 
 Both probability and confidence must reach 0.75 by default. Set `--min-probability` and `--min-confidence` to change these independent thresholds. These are operating thresholds, **not measured accuracy**. An explicit `unknown` category is an ordinary model answer; `abstained` means the acceptance thresholds were not met.
 
@@ -91,11 +103,11 @@ sqlite-utils jev classify tickets.db tickets \
   --min-confidence 0.90 --offline
 ```
 
-Threshold changes reuse the original response. Offline mode stops at the first missing successful answer; earlier result updates remain saved.
+Threshold changes reuse the original response. Offline mode stops at the first missing successful answer; earlier completed batches remain saved. Every answer must validate before any result in its batch is published; result writes for a batch commit together.
 
-`results` holds the last successfully processed result for each source row, key-column name, question and model. Changed inputs and thresholds update that result; different keys, questions or models have separate rows. A failed reevaluation leaves the earlier result in place: its request hash still identifies the earlier input. `attempts` retains earlier requests and raw responses. Rows deleted from the source are not removed from results, and edits after source selection are not observed until the next run. This is a record of processed inputs, not a continuously synchronized view.
+`results` holds the last successfully processed result for each source row, key-column name, question, model and execution mode. Changed inputs and thresholds update that result; different keys, questions or models have separate rows. A failed reevaluation leaves the earlier result in place: its request hash still identifies the earlier input. `attempts` retains earlier requests and raw responses. Rows deleted from the source are not removed from results, and edits after source selection are not observed until the next run. This is a record of processed inputs, not a continuously synchronized view.
 
-Journals created by the original draft upgrade automatically on their next write. That draft did not record key-column names, so its old results are preserved with `source_key_column=''` (unknown). Rerun classification to create correctly identified results from cached answers; legacy rows remain alongside them. Filter by the intended key, for example `WHERE source_key_column='id'`, when reading those results. The upgrade preserves spending history and cached responses; `status` remains read-only.
+Journals created by the original draft upgrade automatically on their next write. That draft did not record key-column names, so its old results are preserved with `source_key_column=''` (unknown). Rerun classification to create correctly identified results from cached answers; legacy rows remain alongside them. Filter by the intended key, for example `WHERE source_key_column='id'`, when reading those results. The upgrade preserves spending history and cached responses; `status` remains read-only. Journal version 3 adds batch input membership, `answer_key`, and `mode`. Old results are marked `isolated`; use that mode to reuse their answers. Older package versions refuse the upgraded journal.
 
 ## Spending and recovery
 
@@ -119,7 +131,7 @@ The default model is `jev-1.13.0`; moving aliases are rejected so cached answers
 
 Reservations use serialized UTF-8 request bytes plus a 4,096-token margin. This is an estimate, **not a provider-enforced spending cap or invoice**. Usage exceeding a reservation or changed provider pricing can exceed the configured allowance. The next request then stops. Account activity outside this journal is not counted.
 
-The runner sends one request at a time, at most once per second, and never automatically retries. After an HTTP error, invalid response or uncertain network outcome, it stops. A restart reuses completed responses but does not blindly redispatch the failed request.
+The runner sends one request at a time (up to 40 distinct rows in packed mode), at most once per second, and never automatically retries. After an HTTP error, invalid response or uncertain network outcome, it stops. A restart reuses completed responses but does not blindly redispatch the failed request.
 
 Inspect the attempt before authorizing another call:
 
@@ -130,6 +142,10 @@ sqlite-utils jev retry decisions.sqlite REQUEST_HASH
 ```
 
 Then repeat `classify`. `retry` authorizes one additional attempt for that exact request and retains the earlier charge/reservation. The first call may already have been billed. For a rate-limit response, wait for the provider's limit to clear; there is no automatic backoff loop. A crash after receiving and saving a valid response can recover from that response without redispatch.
+
+Batch inputs and the exact request are recorded in the same transaction as the spending reservation, before dispatch. A timeout, invalid response or interrupted dispatch blocks both its original request and new batches containing any of those same classification inputs. This also prevents silently retrying them by switching modes or changing the selection. Retry permission applies only to the exact original request. Restore the original selection, question, model and mode before retrying; the journal retains the request body for inspection. Successful recovery permits subsequent regrouping, while the earlier uncertain charge stays accounted for. Selecting genuinely different text or questions creates different inputs.
+
+There is no automatic subdivision or retry of a failed batch. A missing, extra or invalid answer invalidates the entire response; raw data and reported usage remain saved.
 
 ## Python API
 
@@ -167,13 +183,13 @@ with Client("script-decisions.sqlite", budget_usd="1.00") as client:
     print(result["answer"], result["cached"])
 ```
 
-`Client.evaluate()` saves requests/responses but does not populate table results or apply acceptance thresholds. `classify_table()` adds those behaviors. `Client` must be used as a context manager, from one thread at a time. Both interfaces read the key from `TYPESAFE_API_KEY` or accept `api_key=` explicitly. The package does not read project-specific key files.
+`Client.evaluate()` classifies one state. `Client.evaluate_batch([state1, state2], question)` classifies up to 40 packed states and returns an `answers` map keyed `r0`, `r1`, and so on. Both save requests/responses but do not populate table results or apply acceptance thresholds. `classify_table()` adds those behaviors. `Client` must be used as a context manager, from one thread at a time. Both interfaces read the key from `TYPESAFE_API_KEY` or accept `api_key=` explicitly. The package does not read project-specific key files.
 
 ## Deliberate limits
 
 - One local process per journal, enforced by an OS file lock. macOS/Linux only; no background jobs or distributed workers. Use one canonical journal path on a local filesystem, not hard-link aliases or network storage.
 - Source selections are loaded into memory before API calls so source-database locks are released. Intended for small and medium jobs, not warehouse-scale scans.
-- One Choice question per row; multiple selected text columns share that row's state. No SQL UDFs, multi-row packing, arbitrary-query runner or alternate provider endpoints.
+- One Choice question per row; multiple selected text columns share that row's state. No SQL UDFs, arbitrary-query runner or alternate provider endpoints.
 - Serialized requests above 24,000 bytes are rejected without truncation. Preprocess long documents yourself; this package does not perform passage extraction.
 - Requests and responses can contain sensitive source text. New journal and lock files use mode 0600; protect their backups. The key itself is not persisted. There is no automatic retention deletion.
 - No live API smoke test or paid benchmark has been run for this preview. Tests demonstrate software behavior with synthetic responses, not JEV's classification accuracy.
@@ -185,6 +201,15 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-Tests make no external model calls. They cover interruption/resume, actual subprocess crashes and locking, duplicate content, failed responses, budgets, thresholds, source preservation and the installed plugin. The included CI workflow runs tests only; it does not publish packages.
+Tests make no external model calls. They cover interruption/resume, actual subprocess crashes and locking, batch sizing and mapping, regrouping guards, atomic publication, duplicate content, failed responses, budgets, thresholds, source preservation and the installed plugin. The included CI workflow runs tests only; it does not publish packages.
 
 Adapted from operational lessons in a Python/SQLite research application. Independent of TypeSafe, MotherDuck and sqlite-utils. The [TypeSafe API](https://docs.typesafe.ai/api) and [sqlite-utils plugin API](https://sqlite-utils.datasette.io/en/stable/plugins.html) define the external interfaces.
+
+
+### Reproduce interruption and resume without API calls
+
+```sh
+python examples/resume_demo.py
+```
+
+This script creates temporary synthetic data, kills a worker after 200 of 400 rows have committed, and resumes from the same journal. It compares request counts with isolated mode: 10 packed requests across both processes versus 400 isolated requests; 200 rows are recovered from cache. All responses and token counts are scripted. These numbers demonstrate scheduling and recovery, **not measured live speed, cost savings or model agreement**. The test suite separately kills a process with a request in flight and verifies that replay is blocked until explicitly authorized.

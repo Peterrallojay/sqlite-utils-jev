@@ -40,11 +40,20 @@ def jev():
 @click.option("--min-probability", type=click.FloatRange(0, 1), default=0.75, show_default=True)
 @click.option("--min-confidence", type=click.FloatRange(0, 1), default=0.75, show_default=True)
 @click.option("--limit", type=click.IntRange(min=1), help="Process the first N rows ordered by key.")
+@click.option("--mode", type=click.Choice(["packed", "isolated"]), default="packed", show_default=True,
+              help="Packed shares context across rows; isolated sends one row per request.")
+@click.option("--quiet", is_flag=True, help="Suppress progress on stderr; keep the final JSON summary.")
 @click.option("--offline", is_flag=True, help="Reuse saved answers only; fail on a cache miss.")
 @errors
-def classify(database, table, question, text_columns, **kwargs):
+def classify(database, table, question, text_columns, quiet, **kwargs):
     """Classify a table or view. Repeat the command to resume."""
+    def progress(update):
+        click.echo(f"{update['rows']}/{update['total']} rows | {update['cached_rows']} cached rows | "
+                   f"{update['requests']} requests | ${update['accounted_usd']:.6f} accounted "
+                   f"(includes reservations) | {update['remaining']} remaining", err=True)
+
     result = classify_table(database, table, text_columns=list(text_columns),
+                            progress=None if quiet else progress,
                             question=json.loads(question.read_text(encoding="utf-8")), **kwargs)
     click.echo(json.dumps(result, indent=2))
 
