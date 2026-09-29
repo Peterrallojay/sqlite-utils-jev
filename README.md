@@ -10,6 +10,8 @@ Alpha. Python 3.10+. macOS and Linux only: the journal requires a Unix file lock
 
 ## Install
 
+Version 0.1.0 is available on [PyPI](https://pypi.org/project/sqlite-utils-jev/).
+
 ```sh
 python -m pip install sqlite-utils-jev
 ```
