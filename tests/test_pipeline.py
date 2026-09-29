@@ -1,3 +1,4 @@
+from contextlib import closing
 import copy
 import json
 import os
@@ -23,7 +24,7 @@ class PipelineTests(unittest.TestCase):
         self.source, self.state = root / "source.db", root / "results.sqlite"
         self.question = root / "question.json"
         self.question.write_text(json.dumps(QUESTION))
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.executescript("CREATE TABLE tickets(id INTEGER PRIMARY KEY, body TEXT, private TEXT);"
                              "INSERT INTO tickets VALUES(1,'Refund please','never-send-me'),(2,'Broken login','private too'),(3,NULL,'secret');")
         self.http = patch("sqlite_utils_jev.client.urllib.request.build_opener").start()
@@ -38,7 +39,7 @@ class PipelineTests(unittest.TestCase):
         return classify_table(self.source, "tickets", **options)
 
     def saved(self):
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute("SELECT * FROM results ORDER BY source_key")]
 
@@ -70,16 +71,16 @@ class PipelineTests(unittest.TestCase):
 
     def test_changed_row_calls_only_for_changed_input(self):
         self.run_job()
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute("UPDATE tickets SET body='Please refund again' WHERE id=1")
         summary = self.run_job()
         self.assertEqual((summary["requests"], summary["cache_hits"]), (1, 1))
         self.assertEqual(len(self.saved()), 3)
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             self.assertEqual(db.execute("SELECT count(*) FROM attempts").fetchone()[0], 3)
 
     def test_different_key_columns_keep_separate_row_identities(self):
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute("ALTER TABLE tickets ADD COLUMN alternate INTEGER")
             db.execute("UPDATE tickets SET alternate=CASE id WHEN 1 THEN 2 WHEN 2 THEN 1 ELSE 3 END")
         self.run_job()
@@ -95,7 +96,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(alternate["request_hash"], original["2"])
 
     def test_stored_and_virtual_generated_columns(self):
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.executescript("""CREATE TABLE generated (
                 id INTEGER PRIMARY KEY, body TEXT,
                 stored TEXT GENERATED ALWAYS AS (lower(body)) STORED,
@@ -111,7 +112,7 @@ class PipelineTests(unittest.TestCase):
 
     def make_v1_journal(self):
         self.run_job()
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             db.executescript("""BEGIN;
                 ALTER TABLE results RENAME TO current_results;
                 CREATE TABLE results (
@@ -133,12 +134,12 @@ class PipelineTests(unittest.TestCase):
         before = self.state.read_bytes()
         totals = status(self.state)
         self.assertEqual(self.state.read_bytes(), before)  # Status never migrates.
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             attempts = db.execute("SELECT * FROM attempts ORDER BY id").fetchall()
         summary = self.run_job(offline=True)
         self.assertEqual(summary["requests"], 0)
         self.assertEqual(status(self.state), totals)
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(db.execute("SELECT * FROM attempts ORDER BY id").fetchall(), attempts)
         rows = self.saved()
@@ -148,7 +149,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_failed_upgrade_rolls_back_without_losing_legacy_data(self):
         self.make_v1_journal()
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             db.execute("ALTER TABLE results RENAME COLUMN source_key TO broken_key")
         before = self.state.read_bytes()
         with self.assertRaises(sqlite3.OperationalError):
@@ -158,7 +159,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_future_journal_version_is_rejected_without_changes(self):
         self.run_job()
-        with sqlite3.connect(self.state) as db:
+        with closing(sqlite3.connect(self.state)) as db, db:
             db.execute("PRAGMA user_version=999")
         before = self.state.read_bytes()
         with self.assertRaisesRegex(JevError, "Unsupported journal"):
@@ -176,7 +177,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.http.return_value.open.call_count, 2)
 
     def test_duplicate_content_across_rows_is_paid_once(self):
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute("UPDATE tickets SET body='same' WHERE id IN (1,2)")
         summary = self.run_job()
         self.assertEqual((summary["requests"], summary["cache_hits"]), (1, 1))
@@ -194,14 +195,14 @@ class PipelineTests(unittest.TestCase):
     def test_invalid_column_or_text_type_fails_before_spending(self):
         with self.assertRaisesRegex(JevError, "does not exist"):
             self.run_job(text_columns=["missing"])
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute("UPDATE tickets SET body=? WHERE id=2", (b"binary",))
         with self.assertRaisesRegex(JevError, "strings or nulls"):
             self.run_job()
         self.http.return_value.open.assert_not_called()
 
     def test_missing_and_duplicate_keys_rejected_even_with_limit(self):
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.executescript("CREATE VIEW duplicates AS SELECT id,body FROM tickets UNION ALL SELECT id,body FROM tickets;")
         with self.assertRaisesRegex(JevError, "unique"):
             classify_table(self.source, "duplicates", key="id", text_columns=["body"], question=QUESTION, state=self.state, limit=1)
@@ -210,7 +211,7 @@ class PipelineTests(unittest.TestCase):
         self.http.return_value.open.assert_not_called()
 
     def test_quoted_names_and_text_keys(self):
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute('CREATE TABLE "odd "" table" ("key value" TEXT, "text content" TEXT)')
             db.execute('INSERT INTO "odd "" table" VALUES(?,?)', ('a"1', 'refund'))
         classify_table(self.source, 'odd " table', key="key value", text_columns=["text content"],
@@ -229,19 +230,19 @@ class PipelineTests(unittest.TestCase):
                 "--question", str(self.question), "--state", str(self.state), "--budget-usd", "1"]
         result = runner.invoke(cli, base, env={"TYPESAFE_API_KEY": "fake"})
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(json.loads(result.output)["requests"], 2)
+        self.assertEqual(json.loads(result.stdout)["requests"], 2)
         result = runner.invoke(cli, base + ["--offline"], env={"TYPESAFE_API_KEY": ""})
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(json.loads(result.output)["requests"], 0)
+        self.assertEqual(json.loads(result.stdout)["requests"], 0)
         result = runner.invoke(cli, ["jev", "status", str(self.state)])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(json.loads(result.output)["requests"], 2)
+        self.assertEqual(json.loads(result.stdout)["requests"], 2)
 
     def test_cli_budget_and_error_output(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["jev", "budget", str(self.state), "--usd", "0.01"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(json.loads(result.output)["budget_usd"], 0.01)
+        self.assertEqual(json.loads(result.stdout)["budget_usd"], 0.01)
         result = runner.invoke(cli, ["jev", "retry", str(self.state), "missing"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No failed", result.output)

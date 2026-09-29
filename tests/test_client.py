@@ -1,3 +1,4 @@
+from contextlib import closing
 import copy
 import io
 import http.client
@@ -44,7 +45,7 @@ class ClientTests(unittest.TestCase):
         return Client(self.path, api_key="secret-for-tests", budget_usd=1, **kwargs)
 
     def attempts(self):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute("SELECT * FROM attempts ORDER BY id")]
 
@@ -173,7 +174,7 @@ class ClientTests(unittest.TestCase):
     def test_raw_response_can_recover_after_crash_before_validation(self):
         with self.client() as client:
             client.evaluate(STATE, QUESTION)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("UPDATE attempts SET outcome='received',input_tokens=NULL,charge_nano=reservation_nano")
         with self.client() as client:
             self.assertTrue(client.evaluate(STATE, QUESTION, offline=True)["cached"])
@@ -217,7 +218,7 @@ class ClientTests(unittest.TestCase):
         self.http.return_value.open.assert_not_called()
 
     def test_refuses_unrelated_database_and_moving_alias(self):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("CREATE TABLE original(value)")
         before = self.path.read_bytes()
         with self.assertRaisesRegex(JevError, "Not a sqlite-utils-jev"):
@@ -282,7 +283,7 @@ with patch('sqlite_utils_jev.client.urllib.request.build_opener') as http:
     def test_pacing_reads_last_dispatch_after_restart(self):
         with self.client() as client:
             client.evaluate(STATE, QUESTION)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("UPDATE attempts SET started_at=100")
         with patch("sqlite_utils_jev.client.REQUEST_INTERVAL", 1), patch("sqlite_utils_jev.client.time.time", return_value=100.25), patch("sqlite_utils_jev.client.time.sleep") as sleep:
             with self.client() as client:
@@ -319,10 +320,10 @@ with patch('sqlite_utils_jev.client.urllib.request.build_opener') as http:
 
     def test_money_accepts_exact_nanodollars_at_storage_boundaries(self):
         set_budget(self.path, "0.000000001")
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             self.assertEqual(db.execute("SELECT budget_nano FROM settings").fetchone()[0], 1)
         set_budget(self.path, "9223372036.854775807")
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             self.assertEqual(db.execute("SELECT budget_nano FROM settings").fetchone()[0], 2**63 - 1)
         with self.assertRaises(JevError):
             set_budget(self.path, "9223372036.854775808")
