@@ -18,6 +18,26 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def response_json(body: str) -> Any:
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON object key")
+            result[key] = value
+        return result
+    return json.loads(body, object_pairs_hook=unique_object)
+
+
+def validate_questions(questions: dict) -> None:
+    if not isinstance(questions, dict) or not questions:
+        raise JevError("Questions must be a nonempty mapping of names to Choice questions")
+    for name, question in questions.items():
+        if not isinstance(name, str) or not name.strip():
+            raise JevError("Question names must be nonempty strings")
+        validate_question(question)
+
+
 def probability(value: Any) -> bool:
     return type(value) in (int, float) and 0 <= value <= 1 and math.isfinite(value)
 
@@ -38,12 +58,21 @@ def validate_question(question: dict) -> None:
 
 
 def validate_answer(response: Any, question: dict, model: str) -> dict:
+    return validate_answers(response, {"classification": question}, model)["classification"]
+
+
+def validate_answers(response: Any, questions: dict, model: str) -> dict:
     if not isinstance(response, dict) or response.get("model") != model:
         raise JevError("Response model does not match the pinned model")
     answers = response.get("answers")
-    if not isinstance(answers, dict) or set(answers) != {"classification"}:
+    if not isinstance(answers, dict) or set(answers) != set(questions):
         raise JevError("Missing or unexpected answer fields")
-    answer = answers["classification"]
+    for name, question in questions.items():
+        validate_choice(answers[name], question)
+    return answers
+
+
+def validate_choice(answer: Any, question: dict) -> None:
     if not isinstance(answer, dict) or answer.get("type") != "choice":
         raise JevError("Expected a Choice answer")
     selected = answer.get("choice")
@@ -58,4 +87,3 @@ def validate_answer(response: Any, question: dict, model: str) -> dict:
         raise JevError("Probabilities do not sum to one")
     if probs[selected] < max(probs.values()):
         raise JevError("Selected category is not the highest-probability category")
-    return answer

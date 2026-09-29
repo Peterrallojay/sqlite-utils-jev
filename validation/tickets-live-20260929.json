@@ -1,0 +1,77 @@
+{
+  "date": "2026-09-29",
+  "model": "jev-1.13.0",
+  "input_price_usd_per_million": "0.042",
+  "min_probability": 0.75,
+  "min_confidence": 0.6,
+  "summary": {
+    "rows": 4,
+    "accepted": 4,
+    "abstained": 0,
+    "empty": 0,
+    "cached_rows": 0,
+    "total": 4,
+    "remaining": 0,
+    "requests": 4,
+    "cache_hits": 0,
+    "accounted_usd": 6.8838e-05,
+    "question_hash": "648eef8dcb43197608b8efd90fe55881c92238ab77dab71821005922d98aa440",
+    "questions_per_row": 1
+  },
+  "results": [
+    {
+      "source_key": "1",
+      "label": "billing",
+      "proposed_label": "billing",
+      "probability": 1.0,
+      "confidence": 1.0,
+      "status": "accepted"
+    },
+    {
+      "source_key": "2",
+      "label": "technical",
+      "proposed_label": "technical",
+      "probability": 1.0,
+      "confidence": 1.0,
+      "status": "accepted"
+    },
+    {
+      "source_key": "3",
+      "label": "other",
+      "proposed_label": "other",
+      "probability": 1.0,
+      "confidence": 1.0,
+      "status": "accepted"
+    },
+    {
+      "source_key": "4",
+      "label": "unknown",
+      "proposed_label": "unknown",
+      "probability": 1.0,
+      "confidence": 1.0,
+      "status": "accepted"
+    }
+  ],
+  "offline_summary": {
+    "rows": 4,
+    "accepted": 4,
+    "abstained": 0,
+    "empty": 0,
+    "cached_rows": 4,
+    "total": 4,
+    "remaining": 0,
+    "requests": 0,
+    "cache_hits": 4,
+    "accounted_usd": 6.8838e-05,
+    "question_hash": "648eef8dcb43197608b8efd90fe55881c92238ab77dab71821005922d98aa440",
+    "questions_per_row": 1
+  },
+  "spending": {
+    "budget_usd": 0.01,
+    "requests": 4,
+    "input_tokens": 1639,
+    "reported_cost_usd": 6.8838e-05,
+    "unresolved_reservation_usd": 0.0,
+    "blocked_requests": []
+  }
+}

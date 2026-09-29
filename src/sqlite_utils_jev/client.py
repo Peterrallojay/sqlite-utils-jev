@@ -1,6 +1,7 @@
 """One local runner, one journal, no automatic paid retries."""
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from decimal import Decimal, DecimalException, localcontext
 import fcntl
 import http.client
@@ -13,14 +14,18 @@ import time
 import urllib.error
 import urllib.request
 
-from .validation import JevError, canonical, digest, validate_answer, validate_question
+from .validation import JevError, canonical, digest, response_json, validate_answers, validate_questions
 
 API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-1.13.0"
-PRICE = "0.042"  # USD / million input tokens; checked 2026-09-28.
+PRICE = "0.042"  # USD / million input tokens; checked 2026-09-29.
 APPLICATION_ID = 0x4A455631
 MAX_PAYLOAD_BYTES = 24_000
-REQUEST_INTERVAL = 1.0
+
+# Below provider limits of 1,200 requests/minute and 250,000 tokens/second.
+# https://docs.typesafe.ai/models (checked 2026-09-29; provider limits can change).
+REQUEST_INTERVAL = 1 / 18
+TOKENS_PER_SECOND = 200_000
 
 RESULTS_SCHEMA = """
 CREATE TABLE results (
@@ -67,7 +72,7 @@ def units(value: str | float, scale: int) -> int:
 def check_journal(db: sqlite3.Connection) -> None:
     if db.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
         raise JevError("Not a sqlite-utils-jev journal; choose a separate state file")
-    if db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2):
+    if db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 4):
         raise JevError("Unsupported journal schema version")
 
 
@@ -90,6 +95,38 @@ def upgrade_journal(db: sqlite3.Connection) -> None:
             PRAGMA user_version=2;
             COMMIT;
         """)
+
+    if db.execute("PRAGMA user_version").fetchone()[0] == 2:
+        # Preserve user views, indexes and triggers while extending the primary key.
+        objects = db.execute("SELECT sql FROM sqlite_master WHERE tbl_name='results' "
+                             "AND type IN ('index','trigger') AND sql IS NOT NULL").fetchall()
+        legacy = db.execute("PRAGMA legacy_alter_table").fetchone()[0]
+        db.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            # Version 3 belongs to the unreleased packed-record experiment.
+            db.executescript("""BEGIN IMMEDIATE;
+                ALTER TABLE results RENAME TO results_v2;
+                CREATE TABLE results (
+                    source_db TEXT NOT NULL, source_table TEXT NOT NULL, source_key_column TEXT NOT NULL,
+                    source_key TEXT NOT NULL, question_hash TEXT NOT NULL, model TEXT NOT NULL, request_hash TEXT,
+                    label TEXT, proposed_label TEXT, probability REAL, confidence REAL,
+                    status TEXT NOT NULL, min_probability REAL NOT NULL, min_confidence REAL NOT NULL,
+                    processed_at REAL NOT NULL, question_name TEXT NOT NULL,
+                    PRIMARY KEY(source_db,source_table,source_key_column,source_key,question_hash,question_name)
+                );
+                INSERT INTO results SELECT *, 'classification' FROM results_v2;
+                DROP TABLE results_v2;
+                CREATE INDEX IF NOT EXISTS attempts_started ON attempts(started_at);
+            """)
+            for row in objects:
+                db.execute(row[0])
+            db.execute("PRAGMA user_version=4")
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.execute(f"PRAGMA legacy_alter_table={legacy}")
 
 
 @contextmanager
@@ -173,6 +210,53 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise JevError("Credential-bearing redirects are disabled")
 
 
+class BudgetExhausted(JevError):
+    """No room for another reservation; in-flight usage may release room."""
+
+
+@dataclass(frozen=True)
+class PendingRequest:
+    id: int
+    request_hash: str
+    body: bytes
+
+
+@dataclass(frozen=True)
+class HttpResult:
+    status: int | None
+    request_id: str | None
+    body: str | None
+    error: str | None = None
+
+
+def make_payload(state: dict, questions: dict, model: str) -> dict:
+    validate_questions(questions)
+    if not isinstance(state, dict) or not state:
+        raise JevError("State must be a nonempty JSON object")
+    payload = {"model": model, "state": state, "questions": questions}
+    try:
+        encoded = canonical(payload).encode("utf-8")
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        raise JevError("State and questions must contain valid finite JSON data") from None
+    def check_keys(value):
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise JevError("JSON object keys must be strings")
+            for child in value.values():
+                check_keys(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                check_keys(child)
+    try:
+        check_keys(state)
+        snapshot = json.loads(encoded)
+    except (ValueError, TypeError, RecursionError):
+        raise JevError("State and questions must contain valid finite JSON data") from None
+    if len(encoded) > MAX_PAYLOAD_BYTES:
+        raise JevError("Request exceeds 24,000 bytes; shorten the selected text (nothing was truncated)")
+    return snapshot  # Freeze mutable caller-owned JSON before dispatch.
+
+
 class Client:
     """Use as a context manager. One thread/process per journal at a time."""
 
@@ -211,22 +295,23 @@ class Client:
         self._journal.__exit__(*args)
         self.db = None
 
-    def _finish(self, row: sqlite3.Row, question: dict) -> dict:
+    def _finish(self, row: sqlite3.Row, questions: dict) -> dict:
         assert self.db is not None
         try:
-            response = json.loads(row["response_body"])
-        except (ValueError, TypeError):
+            response = response_json(row["response_body"])
+        except (ValueError, TypeError, RecursionError):
             response = None
         usage = response.get("usage") if isinstance(response, dict) else None
         tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
         if type(tokens) is not int or not 0 <= tokens <= (2**63 - 1) // row["price_nano"]:
             tokens = None
         # Raw body was committed first. Settle usage even if semantic validation fails.
-        with self.db:
-            self.db.execute("UPDATE attempts SET input_tokens=?, charge_nano=? WHERE id=?",
-                            (tokens, tokens * row["price_nano"] if tokens is not None else row["reservation_nano"], row["id"]))
+        if row["input_tokens"] is None and tokens is not None:
+            with self.db:
+                self.db.execute("UPDATE attempts SET input_tokens=?, charge_nano=? WHERE id=?",
+                                (tokens, tokens * row["price_nano"], row["id"]))
         try:
-            answer = validate_answer(response, question, self.model)
+            answer = validate_answers(response, questions, self.model)
         except JevError as exc:
             with self.db:
                 self.db.execute("UPDATE attempts SET outcome='invalid',error=? WHERE id=?", (str(exc), row["id"]))
@@ -235,22 +320,30 @@ class Client:
             self.db.execute("UPDATE attempts SET outcome='succeeded' WHERE id=?", (row["id"],))
         return answer
 
-    def evaluate(self, state: dict[str, str | None], question: dict, *, offline: bool = False) -> dict:
+    def evaluate(self, state: dict, question: dict, *, offline: bool = False) -> dict:
+        """Backward-compatible single-question interface."""
+        result = self.evaluate_questions(state, {"classification": question}, offline=offline)
+        return {"request_hash": result["request_hash"], "answer": result["answers"]["classification"],
+                "cached": result["cached"]}
+
+    def evaluate_questions(self, state: dict, questions: dict, *, offline: bool = False) -> dict:
+        """Evaluate named Choice questions against one isolated record."""
+        payload = make_payload(state, questions, self.model)
+        prepared = self._prepare(payload, offline=offline)
+        if isinstance(prepared, PendingRequest):
+            return self._complete(prepared, self._send(prepared), payload["questions"])
+        return prepared
+
+    def _prepare(self, payload: dict, *, offline: bool) -> PendingRequest | dict:
         if self.db is None:
             raise JevError("Use Client inside a with block")
-        validate_question(question)
-        if not isinstance(state, dict) or not state or any(not isinstance(k, str) or (v is not None and not isinstance(v, str)) for k, v in state.items()):
-            raise JevError("State must be a nonempty mapping of column names to text or null")
-        payload = {"model": self.model, "state": state, "questions": {"classification": question}}
         encoded = canonical(payload).encode("utf-8")
-        if len(encoded) > MAX_PAYLOAD_BYTES:
-            raise JevError("Request exceeds 24,000 bytes; shorten the selected text (nothing was truncated)")
         request_hash = digest(payload)
         row = self.db.execute("SELECT * FROM attempts WHERE request_hash=? ORDER BY id DESC LIMIT 1", (request_hash,)).fetchone()
         if row and row["outcome"] in ("succeeded", "received") and row["http_status"] == 200:
-            answer = self._finish(row, question)
+            answer = self._finish(row, payload["questions"])
             self.cache_hits += 1
-            return {"request_hash": request_hash, "answer": answer, "cached": True}
+            return {"request_hash": request_hash, "answers": answer, "cached": True}
         if row and not row["retry_allowed"]:
             raise JevError(f"Previous attempt is {row['outcome']}; inspect status, then explicitly authorize retry for {request_hash}")
         if offline:
@@ -264,17 +357,35 @@ class Client:
         if budget is None:
             raise JevError("Set a total budget with --budget-usd or the budget command")
         if spent(self.db) + reservation > budget[0]:
-            raise JevError("Persistent budget exhausted; successful results remain saved")
-        last = self.db.execute("SELECT max(started_at) FROM attempts").fetchone()[0]
-        if last is not None:
-            time.sleep(max(0, last + REQUEST_INTERVAL - time.time()))
+            raise BudgetExhausted("Persistent budget exhausted; successful results remain saved")
+        self._pace(len(encoded) + 4096)
         with self.db:
             attempt_id = self.db.execute("""INSERT INTO attempts
                 (request_hash,request_json,started_at,outcome,price_nano,reservation_nano,charge_nano)
                 VALUES(?,?,?,'pending',?,?,?)""",
                 (request_hash, encoded.decode(), time.time(), self.price, reservation, reservation)).lastrowid
         self.requests += 1
-        request = urllib.request.Request(API, data=encoded, headers={
+        return PendingRequest(attempt_id, request_hash, encoded)
+
+    def _pace(self, tokens: int) -> None:
+        assert self.db is not None
+        while True:
+            now = time.time()
+            recent = self.db.execute("""SELECT started_at, coalesce(input_tokens, reservation_nano/price_nano)
+                FROM attempts WHERE started_at>? ORDER BY started_at""", (now - 1,)).fetchall()
+            delay = max(0, recent[-1][0] + REQUEST_INTERVAL - now) if recent else 0
+            if recent and sum(row[1] for row in recent) + tokens > TOKENS_PER_SECOND:
+                delay = max(delay, recent[0][0] + 1 - now)
+            if delay <= 0:
+                return
+            time.sleep(delay)
+            # Recheck token windows, but one request-spacing sleep is sufficient.
+            if sum(row[1] for row in recent) + tokens <= TOKENS_PER_SECOND:
+                return
+
+    def _send(self, pending: PendingRequest) -> HttpResult:
+        """Worker-only I/O: never reads or writes the SQLite connection."""
+        request = urllib.request.Request(API, data=pending.body, headers={
             "Content-Type": "application/json", "Authorization": "Bearer " + self.key})
         code, request_id, raw = None, None, None
         try:
@@ -289,17 +400,20 @@ class Client:
         except (OSError, http.client.HTTPException, JevError) as exc:
             if isinstance(exc, http.client.IncompleteRead):
                 raw = exc.partial.decode("utf-8", errors="replace")
-            with self.db:
-                self.db.execute("""UPDATE attempts SET outcome='unknown',error=?,finished_at=?,
-                    http_status=?,request_id=?,response_body=? WHERE id=?""",
-                    (type(exc).__name__, time.time(), code, request_id, raw, attempt_id))
-            raise JevError(f"Request outcome unknown; reservation retained for {request_hash}") from None
+            return HttpResult(code, request_id, raw, type(exc).__name__)
+        return HttpResult(code, request_id, raw)
+
+    def _complete(self, pending: PendingRequest, response: HttpResult, questions: dict) -> dict:
+        assert self.db is not None
+        outcome = "unknown" if response.error else "received" if response.status == 200 else "http_error"
         with self.db:
-            self.db.execute("""UPDATE attempts SET http_status=?,request_id=?,response_body=?,
+            self.db.execute("""UPDATE attempts SET http_status=?,request_id=?,response_body=?,error=?,
                 finished_at=?,outcome=? WHERE id=?""",
-                (code, request_id, raw, time.time(), "received" if code == 200 else "http_error", attempt_id))
-        row = self.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-        if code != 200:
-            # Error billing may be unknown: keep the reservation and stop, even on 429.
-            raise JevError(f"HTTP {code}; response and reservation retained for {request_hash}. No automatic retry.")
-        return {"request_hash": request_hash, "answer": self._finish(row, question), "cached": False}
+                (response.status, response.request_id, response.body, response.error,
+                 time.time(), outcome, pending.id))
+        if response.error:
+            raise JevError(f"Request outcome unknown; reservation retained for {pending.request_hash}")
+        if response.status != 200:
+            raise JevError(f"HTTP {response.status}; response and reservation retained for {pending.request_hash}. No automatic retry.")
+        row = self.db.execute("SELECT * FROM attempts WHERE id=?", (pending.id,)).fetchone()
+        return {"request_hash": pending.request_hash, "answers": self._finish(row, questions), "cached": False}

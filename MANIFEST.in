@@ -1,4 +1,6 @@
-include README.md REVIEW.md CODE_REVIEW.md LICENSE .gitignore
+include README.md VALIDATION.md LICENSE .gitignore
 recursive-include examples *.json *.csv
 recursive-include tests *.py
 recursive-include .github *.yml
+recursive-include validation *.json
+recursive-include docs *.md
