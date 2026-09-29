@@ -44,7 +44,7 @@
   },
   "offline_cache_hits": 100,
   "offline_requests": 0,
-  "scope": "Controlled live check of the package concurrent runner on 100 unchanged Peptides request payloads; not production deployment, a representative accuracy evaluation, or a comparative speed benchmark.",
+  "scope": "Controlled live check of the package concurrent runner on 100 unchanged request payloads from a real research-classification workload; not deployment evidence, a representative accuracy evaluation, or a comparative speed benchmark.",
   "selection": "Consecutive saved successful request rowids 101993 through 102092; a convenience sample, all four named Choice questions.",
   "choice_matches": 378,
   "choice_comparisons": 400,

@@ -42,7 +42,7 @@ def jev():
 @click.option("--model", default=MODEL, show_default=True)
 @click.option("--input-price", default=PRICE, show_default=True, help="USD per million input tokens; used for estimates/accounting.")
 @click.option("--min-probability", type=click.FloatRange(0, 1), default=0.75, show_default=True)
-@click.option("--min-confidence", type=click.FloatRange(0, 1), default=0.75, show_default=True)
+@click.option("--min-confidence", type=click.FloatRange(0, 1), default=0.60, show_default=True)
 @click.option("--limit", type=click.IntRange(min=1), help="Process the first N rows ordered by key.")
 @click.option("--offline", is_flag=True, help="Reuse saved answers only; fail on a cache miss.")
 @errors

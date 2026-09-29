@@ -53,7 +53,7 @@ def classify_table(database: str | Path, table: str, *, key: str,
                    question: dict | None = None, questions: dict | None = None,
                    budget_usd: str | float | None = None, api_key: str | None = None,
                    model: str = MODEL, input_price: str | float = PRICE,
-                   min_probability: float = 0.75, min_confidence: float = 0.75,
+                   min_probability: float = 0.75, min_confidence: float = 0.60,
                    limit: int | None = None, offline: bool = False, workers: int = 8,
                    progress: Callable[[dict], None] | None = None) -> dict:
     """Evaluate one isolated record per request; repeat the call to resume."""

@@ -38,10 +38,12 @@ All answers must pass validation before the tool saves the record results in one
 | `request_hash` | Link to inputs and responses in `attempts` |
 
 Use `json_extract(source_key, '$')` to read the original key.
-Use `--offline --min-confidence 0.90` to change a threshold without API calls.
+Defaults are 0.75 probability and 0.60 confidence. Thresholds depend on the workload; test them on labeled records.
+Use `--offline --min-confidence 0.50` to change a threshold without API calls.
 Use `--min-probability` to change the other threshold.
 Offline work needs no API key. It stops when a saved answer is missing.
 
+Results store the source database’s absolute path. Moving the source creates separate result rows; saved answers remain reusable.
 A failed request leaves previous results in place.
 The tool retains results for deleted records and different question sets.
 Source changes after selection apply to the next run.
@@ -95,13 +97,16 @@ A forced process termination can leave unresolved requests that need inspection 
 
 ## Defaults and storage
 
-Defaults are `jev-1.13.0` and $0.042 per million input tokens.
-Use `--model` and `--input-price` to change them for new requests.
-The model must specify a fixed version.
-Check the [provider documentation](https://docs.typesafe.ai/models) for current prices and limits.
+Defaults are `jev-1.13.0` and $0.042 per million input tokens, checked on 29 September 2026.
+If you select another model version, pass its fixed ID with `--model` and its current rate with `--input-price`.
+If your current model’s price changes, pass the new rate with `--input-price` before new requests.
+Each attempt keeps its original rate. Cache reads do not change recorded costs.
+The documented model API does not supply prices. Check the [provider documentation](https://docs.typesafe.ai/models) before paid work.
 
 Reservations use request bytes plus 4,096 estimated tokens.
 Local limits permit 18 request starts and 200,000 estimated input tokens per second.
+These values leave room below the provider’s documented 1,200 requests per minute and 250,000 tokens per second.
+Source: [TypeSafe model limits](https://docs.typesafe.ai/models), checked on 29 September 2026. Provider limits can change without notice.
 
 Use one journal path on a local filesystem.
 Do not use hard-link aliases or network storage.

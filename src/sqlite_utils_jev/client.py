@@ -18,9 +18,12 @@ from .validation import JevError, canonical, digest, response_json, validate_ans
 
 API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-1.13.0"
-PRICE = "0.042"  # USD / million input tokens; checked 2026-09-28.
+PRICE = "0.042"  # USD / million input tokens; checked 2026-09-29.
 APPLICATION_ID = 0x4A455631
 MAX_PAYLOAD_BYTES = 24_000
+
+# Below provider limits of 1,200 requests/minute and 250,000 tokens/second.
+# https://docs.typesafe.ai/models (checked 2026-09-29; provider limits can change).
 REQUEST_INTERVAL = 1 / 18
 TOKENS_PER_SECOND = 200_000
 

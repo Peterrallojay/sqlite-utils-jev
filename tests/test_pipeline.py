@@ -69,6 +69,26 @@ class PipelineTests(unittest.TestCase):
         self.run_job(min_probability=0.95, min_confidence=0.91, offline=True)
         self.assertEqual(self.saved()[0]["status"], "abstained")
 
+    def test_default_confidence_boundary_and_cli_match(self):
+        def response(request, **kwargs):
+            payload = copy.deepcopy(RESPONSE)
+            body = json.loads(request.data)["state"]["body"]
+            payload["answers"]["classification"]["confidence"] = 0.60 if body == "Refund please" else 0.59
+            return Response(json.dumps(payload).encode())
+
+        self.http.return_value.open.side_effect = response
+        self.run_job()
+        self.assertEqual([row["status"] for row in self.saved()], ["accepted", "abstained", "empty"])
+        self.run_job(min_confidence=0.75, offline=True)
+        self.assertEqual(self.saved()[0]["status"], "abstained")
+        result = CliRunner().invoke(cli, [
+            "jev", "classify", str(self.source), "tickets", "--key", "id", "--text", "body",
+            "--question", str(self.question), "--state", str(self.state), "--offline",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual([row["status"] for row in self.saved()], ["accepted", "abstained", "empty"])
+        self.assertEqual(self.http.return_value.open.call_count, 2)
+
     def test_changed_row_calls_only_for_changed_input(self):
         self.run_job()
         with closing(sqlite3.connect(self.source)) as db, db:

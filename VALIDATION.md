@@ -2,7 +2,8 @@
 
 ## Tests and review
 
-All 64 tests pass on Linux and macOS with Python 3.10, 3.12 and 3.14.
+The 64-test baseline passed on Linux and macOS with Python 3.10, 3.12 and 3.14.
+A new regression test checks the 0.60 confidence default in Python and the CLI.
 Package build and installed-wheel checks pass.
 
 Tests cover concurrent requests, duplicate inputs, cost reservations, retries, interruptions, result identity and journal upgrades.
@@ -17,7 +18,7 @@ Final reviews found no remaining actionable defects.
 
 ## API check: 29 September 2026
 
-The check used 100 consecutive saved Peptides requests with four Choice questions each.
+The check used 100 consecutive saved requests from a real research-classification workload with four Choice questions each.
 Inputs did not change. The model was `jev-1.13.0`.
 
 | Measurement | Result |
@@ -35,6 +36,13 @@ Inputs did not change. The model was `jev-1.13.0`.
 This measures repeated-answer agreement, not accuracy or comparative speed.
 The sample was not representative. The live check used the concurrent runner.
 Separate tests cover SQLite text selection and saved responses through the public Python client.
-The production database and journal did not change.
+The source database and existing journal did not change.
 
 See the [full measurements](validation/isolated-live-20260929.json).
+
+## Ticket demo: 29 September 2026
+
+The four-ticket example used 1,639 input tokens across four successful requests.
+Estimated cost was $0.000068838. No reservations remained unresolved.
+The offline threshold change reused all four responses without API calls.
+See the [demo measurements](validation/tickets-live-20260929.json).
