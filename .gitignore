@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.coverage
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.lock
+.env*
+secrets/

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqlite-utils-jev"
+version = "0.1.0.dev0"
+description = "Resumable Jev classification for SQLite, with persistent spending accounting"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["sqlite-utils>=3.38,<4", "click>=8.1,<9"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Topic :: Database",
+]
+
+[project.entry-points.sqlite_utils]
+jev = "sqlite_utils_jev.cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sqlite_utils_jev = ["py.typed"]
