@@ -1,3 +1,5 @@
+> Historical review of the original single-question release. See [VALIDATION.md](VALIDATION.md) for the current concurrency change.
+
 # Standalone package code review — 28 September 2026
 
 Reviewed all package source, tests, examples, documentation, packaging and CI. The scope is this standalone JEV utility, not the parent Peptides application. The baseline is the original draft source bundle; the specification is the requested small SQLite utility and its documented public contract. Independent standards and contract reviews were followed by reproductions, fixes and a second review.

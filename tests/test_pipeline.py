@@ -140,7 +140,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(summary["requests"], 0)
         self.assertEqual(status(self.state), totals)
         with closing(sqlite3.connect(self.state)) as db, db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(db.execute("SELECT * FROM attempts ORDER BY id").fetchall(), attempts)
         rows = self.saved()
         self.assertEqual(len(rows), 6)
@@ -171,7 +171,7 @@ class PipelineTests(unittest.TestCase):
         self.http.return_value.open.side_effect = [Response(json.dumps(RESPONSE).encode()), TimeoutError()]
         with self.assertRaises(JevError):
             self.run_job()
-        self.assertEqual(len(self.saved()), 1)
+        self.assertEqual(len(self.saved()), 2)
         with self.assertRaisesRegex(JevError, "Previous attempt"):
             self.run_job()
         self.assertEqual(self.http.return_value.open.call_count, 2)

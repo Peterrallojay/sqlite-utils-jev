@@ -1,0 +1,59 @@
+{
+  "started_at_utc": "2026-09-29T06:42:12.680872+00:00",
+  "source_rowids": [
+    101993,
+    102092
+  ],
+  "sample_size": 100,
+  "workers": 8,
+  "model": "jev-1.13.0",
+  "local_allowance_usd": 0.15,
+  "user_ceiling_usd": 0.2,
+  "elapsed_seconds": 6.274,
+  "max_in_flight": 8,
+  "completed": 100,
+  "accounting": {
+    "budget_usd": 0.15,
+    "requests": 100,
+    "input_tokens": 195464,
+    "reported_cost_usd": 0.008209488,
+    "unresolved_reservation_usd": 0.0,
+    "blocked_requests": []
+  },
+  "question_agreement": {
+    "outcome_focus": {
+      "compared": 100,
+      "same_choice": 89,
+      "same_threshold_acceptance": 89
+    },
+    "research_model": {
+      "compared": 100,
+      "same_choice": 98,
+      "same_threshold_acceptance": 92
+    },
+    "source_kind": {
+      "compared": 100,
+      "same_choice": 98,
+      "same_threshold_acceptance": 99
+    },
+    "study_design": {
+      "compared": 100,
+      "same_choice": 93,
+      "same_threshold_acceptance": 95
+    }
+  },
+  "offline_cache_hits": 100,
+  "offline_requests": 0,
+  "scope": "Controlled live check of the package concurrent runner on 100 unchanged Peptides request payloads; not production deployment, a representative accuracy evaluation, or a comparative speed benchmark.",
+  "selection": "Consecutive saved successful request rowids 101993 through 102092; a convenience sample, all four named Choice questions.",
+  "choice_matches": 378,
+  "choice_comparisons": 400,
+  "choice_agreement": 0.945,
+  "thresholds": {
+    "min_probability": 0.75,
+    "min_confidence": 0.75
+  },
+  "input_transformation": "None: original structured state, question map and pinned model, verified by canonical request hash.",
+  "records_with_all_choices_matching": 81,
+  "sorted_request_hashes_sha256": "c925327aab94e77c6a081592afe4e1819b7edeee01e2f4e6c88f9ab8da193cd9"
+}

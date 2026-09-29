@@ -1,11 +1,14 @@
 """Read a table, classify selected text, write a separate result journal."""
 
+from collections.abc import Callable
+import copy
 from pathlib import Path
 import sqlite3
 import time
 
-from .client import Client, MODEL, PRICE
-from .validation import JevError, canonical, digest, probability, validate_question
+from .client import Client, MODEL, PRICE, make_payload, spent
+from .runner import run_requests
+from .validation import JevError, canonical, digest, probability, validate_questions
 
 
 def identifier(name: str) -> str:
@@ -46,50 +49,88 @@ def read_rows(database: Path, table: str, key: str, text_columns: list[str], lim
 
 
 def classify_table(database: str | Path, table: str, *, key: str,
-                   text_columns: list[str], question: dict, state: str | Path,
+                   text_columns: list[str], state: str | Path,
+                   question: dict | None = None, questions: dict | None = None,
                    budget_usd: str | float | None = None, api_key: str | None = None,
                    model: str = MODEL, input_price: str | float = PRICE,
                    min_probability: float = 0.75, min_confidence: float = 0.75,
-                   limit: int | None = None, offline: bool = False) -> dict:
-    """Resume by repeating the same call. Only new request content needs the API."""
-    validate_question(question)
+                   limit: int | None = None, offline: bool = False, workers: int = 8,
+                   progress: Callable[[dict], None] | None = None) -> dict:
+    """Evaluate one isolated record per request; repeat the call to resume."""
+    if (question is None) == (questions is None):
+        raise JevError("Supply exactly one of question or questions")
+    questions = copy.deepcopy(questions if questions is not None else {"classification": question})
+    validate_questions(questions)
+    if type(workers) is not int or not 1 <= workers <= 16:
+        raise JevError("Workers must be an integer from 1 to 16")
     if not probability(min_probability) or not probability(min_confidence):
         raise JevError("Acceptance thresholds must be finite numbers between zero and one")
     database, state = Path(database).resolve(strict=True), Path(state).resolve()
     if database == state or (state.exists() and database.samefile(state)):
         raise JevError("State must be a separate file from the source database")
     rows = read_rows(database, table, key, text_columns, limit)
-    counts = {"rows": 0, "accepted": 0, "abstained": 0, "empty": 0}
-    question_hash = digest({"model": model, "question": question})
+    selected, payloads, empty = [], [], []
+    for row in rows:
+        text = {name: row[name] for name in text_columns}
+        if any(value and value.strip() for value in text.values()):
+            payloads.append(make_payload(text, questions, model))
+            selected.append(row)
+        else:
+            empty.append(row)
+    # Preserve the original single-question task identity and cache format.
+    identity = {"model": model, "question": questions["classification"]} if set(questions) == {"classification"} else {
+        "model": model, "questions": questions}
+    question_hash = digest(identity)
+    counts = {"rows": 0, "accepted": 0, "abstained": 0, "empty": 0, "cached_rows": 0}
     with Client(state, budget_usd=budget_usd, api_key=api_key, model=model, input_price=input_price) as client:
         assert client.db is not None
-        for row in rows:
-            text = {name: row[name] for name in text_columns}
-            request_hash, label, proposed, score, confidence = None, None, None, None, None
-            result_status = "empty"
-            if any(value and value.strip() for value in text.values()):
-                result = client.evaluate(text, question, offline=offline)
-                request_hash, answer = result["request_hash"], result["answer"]
-                proposed = answer["choice"]
-                score, confidence = answer["probabilities"][proposed], answer["confidence"]
-                accepted = score >= min_probability and confidence >= min_confidence
-                label, result_status = (proposed, "accepted") if accepted else (None, "abstained")
+
+        def report():
+            return {**counts, "total": len(rows), "remaining": len(rows) - counts["rows"],
+                    "requests": client.requests, "cache_hits": client.cache_hits,
+                    "accounted_usd": spent(client.db) / 1e9, "state": str(state),
+                    "question_hash": question_hash, "questions_per_row": len(questions)}
+
+        def save(row, result):
+            outcomes = []
             with client.db:
-                client.db.execute("""INSERT INTO results
-                    (source_db,source_table,source_key_column,source_key,question_hash,model,
-                     request_hash,label,proposed_label,probability,confidence,status,
-                     min_probability,min_confidence,processed_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(source_db,source_table,source_key_column,source_key,question_hash) DO UPDATE SET
-                    request_hash=excluded.request_hash,label=excluded.label,
-                    proposed_label=excluded.proposed_label,probability=excluded.probability,
-                    confidence=excluded.confidence,status=excluded.status,
-                    min_probability=excluded.min_probability,min_confidence=excluded.min_confidence,
-                    processed_at=excluded.processed_at""",
-                    (str(database), table, key, canonical(row[key]), question_hash, model, request_hash,
-                     label, proposed, score, confidence, result_status,
-                     min_probability, min_confidence, time.time()))
+                for name in questions:
+                    answer = result["answers"][name] if result else None
+                    proposed = answer["choice"] if answer else None
+                    score = answer["probabilities"][proposed] if answer else None
+                    confidence = answer["confidence"] if answer else None
+                    outcome = "empty" if answer is None else "accepted" if (
+                        score >= min_probability and confidence >= min_confidence) else "abstained"
+                    label = proposed if outcome == "accepted" else None
+                    client.db.execute("""INSERT INTO results
+                        (source_db,source_table,source_key_column,source_key,question_hash,model,
+                         request_hash,label,proposed_label,probability,confidence,status,
+                         min_probability,min_confidence,processed_at,question_name)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(source_db,source_table,source_key_column,source_key,question_hash,question_name)
+                        DO UPDATE SET request_hash=excluded.request_hash,label=excluded.label,
+                        proposed_label=excluded.proposed_label,probability=excluded.probability,
+                        confidence=excluded.confidence,status=excluded.status,
+                        min_probability=excluded.min_probability,min_confidence=excluded.min_confidence,
+                        processed_at=excluded.processed_at""",
+                        (str(database), table, key, canonical(row[key]), question_hash, model,
+                         result["request_hash"] if result else None, label, proposed, score, confidence, outcome,
+                         min_probability, min_confidence, time.time(), name))
+                    outcomes.append(outcome)
+            # Summary counts rows: a row is accepted only when every question is.
+            outcome = "empty" if result is None else "abstained" if "abstained" in outcomes else "accepted"
             counts["rows"] += 1
-            counts[result_status] += 1
-        return {**counts, "requests": client.requests, "cache_hits": client.cache_hits,
-                "state": str(state), "question_hash": question_hash}
+            counts[outcome] += 1
+            counts["cached_rows"] += int(bool(result and result["cached"]))
+
+        def publish(index, result):
+            save(selected[index], result)
+            if progress:
+                progress(report())
+
+        for row in empty:
+            save(row, None)
+        if progress:
+            progress(report())
+        run_requests(client, payloads, workers=workers, offline=offline, publish=publish)
+        return report()

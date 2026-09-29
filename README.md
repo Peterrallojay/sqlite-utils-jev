@@ -1,14 +1,10 @@
 # sqlite-utils-jev
 
-Classify text in a SQLite table with [TypeSafe Jev](https://docs.typesafe.ai/), save the decisions, and resume without repeating successful requests.
+Run [TypeSafe Jev](https://docs.typesafe.ai/) over SQLite text, with parallel requests, saved answers, a shared spending allowance and restart recovery.
 
-**Early preview.** Python 3.10+, macOS or Linux. MIT licensed. Install from source; this package is not yet published on PyPI.
+**Early preview:** Python 3.10+, macOS/Linux, MIT. Install from source; not published on PyPI. Inference uses TypeSafe's hosted API. Results and accounting stay in a separate local SQLite journal; the source database is read-only.
 
-This package provides a `sqlite-utils` command and a Python API. It reads selected text columns and writes a **separate SQLite file** containing results, raw responses and spending history. Your source database stays unchanged. Jev inference uses TypeSafe's hosted API; saved results can be queried offline.
-
-## Install
-
-Clone the repository and install into a virtual environment:
+## Install and classify
 
 ```sh
 git clone https://github.com/Peterrallojay/sqlite-utils-jev.git
@@ -16,20 +12,10 @@ cd sqlite-utils-jev
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
-sqlite-utils jev --help
-```
-
-Already using `sqlite-utils`? Install into its environment with `sqlite-utils install .`.
-
-## Classify a table
-
-Create a small database from the bundled synthetic tickets, using a new filename:
-
-```sh
 sqlite-utils insert tickets.db tickets examples/tickets.csv --csv --pk id
 ```
 
-Set `TYPESAFE_API_KEY` in your environment, then run:
+Set `TYPESAFE_API_KEY` in your environment, then:
 
 ```sh
 sqlite-utils jev classify tickets.db tickets \
@@ -38,153 +24,100 @@ sqlite-utils jev classify tickets.db tickets \
   --state decisions.sqlite --budget-usd 1.00
 ```
 
-This command sends selected text to TypeSafe and may incur API charges. Only explicitly selected text columns are sent; the row key is not sent unless also selected with `--text`.
+This sends the selected text to TypeSafe and may incur charges. The key is sent only if also selected with `--text`. Use a new filename for the example database.
 
-The question is a single Choice question:
+Repeat the command to resume. Identical requests reuse saved responses. Eight HTTP workers run by default; use `--workers 1` for sequential execution or choose 1–16 workers. **Each request contains one record**, regardless of worker count. Different records never share model context.
+
+Progress goes to stderr; the final JSON summary goes to stdout. `--quiet` suppresses progress. `--limit 20` selects the first 20 rows ordered by key. For filtering, classify a SQLite view. Keys must be unique, non-null integers or strings; selected columns must contain text or nulls. Whitespace-only rows are saved as `empty` without a request.
+
+## Several questions about each record
+
+Use `--questions examples/questions.json` instead of `--question`. Its JSON maps names to Choice questions:
 
 ```json
 {
-  "type": "choice",
-  "instructions": "Which team should handle this ticket? Choose unknown if the text is insufficient.",
-  "criteria": {
-    "billing": "Payments, invoices and refunds",
-    "technical": "Errors, outages and installation problems",
-    "unknown": "Insufficient information"
+  "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this ticket?",
+    "criteria": {"billing": "Payments and refunds", "technical": "Bugs and outages"}
+  },
+  "urgency": {
+    "type": "choice",
+    "instructions": "Does this ticket explicitly require urgent action?",
+    "criteria": {"urgent": "Explicit urgency", "normal": "No explicit urgency"}
   }
 }
 ```
 
-Choose 2–255 categories with string or null descriptions. This first version supports category classification only. Instructions must be a nonempty string. Noul and Score are outside this release's scope.
+All questions are sent together with that record. Every answer must validate before any result for the record is published; those writes commit together. Only Choice is supported, with nonempty string instructions and 2–255 categories whose descriptions are strings or nulls.
 
-Repeat the same command to resume. Unchanged successful requests come from the journal. Changed text, question or pinned model produces a new request. Identical text under the same column names can share a response across rows. Empty or whitespace-only rows are recorded as `empty` without an API call.
-
-Use `--limit 20` to start with the first 20 rows ordered by key. To filter a dataset, prepare a SQLite view and classify that view. The key must be a unique, non-null integer or string throughout the table/view. Selected columns must contain strings or nulls.
+The cache identity includes the complete selected text, column names, question map and pinned model. Changing a question causes a new request; adding a question does not reuse partial answers. Duplicate records reuse one request, including when workers overlap. Changing the selected rows or their order does not invalidate unchanged records.
 
 ## Read results
 
 ```sh
 sqlite-utils decisions.sqlite \
-  "select source_key_column, source_key, label, proposed_label, probability, confidence, status from results"
+  "select source_key, question_name, label, proposed_label, probability, confidence, status from results"
 ```
 
-`source_key` is JSON-encoded to preserve integer versus string identities; use SQLite's `json_extract(source_key, '$')` to recover the original value.
+There is one result per source record and question name. Single-question calls use `classification`. `label` is accepted only when both probability and confidence meet their thresholds (default 0.75); otherwise it is null and `status` is `abstained`. `proposed_label` retains the model's choice. These thresholds are not measured accuracy.
 
-| Column | Meaning |
-| --- | --- |
-| `label` | Accepted category, or `NULL` when below the thresholds |
-| `proposed_label` | JEV's category even if it was not accepted |
-| `probability` | Probability assigned to that category |
-| `confidence` | The model's separate distribution-derived confidence |
-| `status` | `accepted`, `abstained` or `empty` |
-| `source_db`, `source_table`, `source_key_column`, `source_key` | Origin of the input row, including the column used as its key |
-| `question_hash`, `model` | Identity of the classification task |
-| `request_hash` | Look up request, response and usage in `attempts`; retries can produce several attempts per hash |
+`source_key` is JSON-encoded to preserve integer/string identity; recover it with `json_extract(source_key, '$')`. `source_db`, `source_table` and `source_key_column` identify its origin. `question_hash` identifies the whole question set and model. `request_hash` connects a result to the exact inputs and raw responses in `attempts`; `question_name` selects its answer.
 
-Both probability and confidence must reach 0.75 by default. Set `--min-probability` and `--min-confidence` to change these independent thresholds. These are operating thresholds, **not measured accuracy**. An explicit `unknown` category is an ordinary model answer; `abstained` means the acceptance thresholds were not met.
+To apply different thresholds without API calls, repeat classification with `--offline --min-confidence 0.90`. Offline mode needs no key and stops on a cache miss. Summary counts are **rows**: a row is accepted only if every question passes; individual statuses remain available in `results`. `cache_hits` counts reused requests and `cached_rows` counts recovered source rows.
 
-Reclassify using only saved answers, without a key or network calls:
+Results describe the last successfully processed snapshot. Changed inputs update results only after success; a failed reevaluation leaves earlier results intact. Deleted source rows are not automatically removed. Different question sets retain separate results. Source edits after selection are observed on the next run.
 
-```sh
-sqlite-utils jev classify tickets.db tickets \
-  --key id --text subject --text body \
-  --question examples/routing.json --state decisions.sqlite \
-  --min-confidence 0.90 --offline
-```
+## Shared allowance and recovery
 
-Threshold changes reuse the original response. Offline mode stops at the first missing successful answer; earlier result updates remain saved.
-
-`results` holds the last successfully processed result for each source row, key-column name, question and model. Changed inputs and thresholds update that result; different keys, questions or models have separate rows. A failed reevaluation leaves the earlier result in place: its request hash still identifies the earlier input. `attempts` retains earlier requests and raw responses. Rows deleted from the source are not removed from results, and edits after source selection are not observed until the next run. This is a record of processed inputs, not a continuously synchronized view.
-
-Journals created by the original draft upgrade automatically on their next write. That draft did not record key-column names, so its old results are preserved with `source_key_column=''` (unknown). Rerun classification to create correctly identified results from cached answers; legacy rows remain alongside them. Filter by the intended key, for example `WHERE source_key_column='id'`, when reading those results. The upgrade preserves spending history and cached responses; `status` remains read-only.
-
-## Spending and recovery
+Use the **same `--state` path across tables, databases and successive runs** to share spending and caches. The first `--budget-usd` sets a total lifetime allowance for that journal. Subsequent values must match; separate journals have separate allowances. One process owns a journal at a time, with concurrent HTTP workers inside it.
 
 ```sh
 sqlite-utils jev status decisions.sqlite
-```
-
-The first `--budget-usd` sets a **total allowance for that journal**, including future runs. Passing it again must match the saved allowance. All processes using that journal share its accounting. Separate state files have separate allowances; keep the journal to preserve its cache and spending history.
-
-To explicitly change the total:
-
-```sh
 sqlite-utils jev budget decisions.sqlite --usd 2.00
 ```
 
-This means $2 total, not $2 more. It never resets previous spending and cannot go below recorded costs and unresolved reservations.
+The second command changes the total to $2, not $2 more. It cannot go below recorded costs and unresolved reservations. Every request reserves spending durably before dispatch; workers cannot spend the same remaining allowance. Reported input usage settles the reservation, even when an answer is invalid. Already settled history is never repriced by cache reads.
 
-Each request reserves an estimate before dispatch. A successful response's input-token usage settles that estimate at the configured rate. Missing usage, timeouts and HTTP errors retain the reservation. The raw HTTP response is saved before answer validation, so invalid decisions do not erase their usage. Incomplete responses retain any available status, request identifier and partial body while keeping the outcome `unknown`; partial bodies are never used as cached answers. `status` distinguishes `reported_cost_usd` from `unresolved_reservation_usd` and lists blocked request hashes.
+Reservations estimate input tokens using serialized request bytes plus 4,096. The default rate is $0.042 per million input tokens for pinned model `jev-1.13.0`, checked against [TypeSafe's model documentation](https://docs.typesafe.ai/models) on 2026-09-28. Use `--model` and `--input-price` for another pinned version/rate. Moving model aliases are rejected. **This is local accounting, not a provider-enforced spending cap:** actual usage or changed prices can exceed the estimate. Activity using another journal is not included.
 
-The default model is `jev-1.13.0`; moving aliases are rejected so cached answers do not silently change meaning. The default input price is $0.042 per million tokens, checked against [TypeSafe's model documentation](https://docs.typesafe.ai/models) on 2026-09-28. `--input-price` can change the rate for new requests, in USD per million tokens. Each attempt retains its own rate; changing the setting does not reprice history.
-
-Reservations use serialized UTF-8 request bytes plus a 4,096-token margin. This is an estimate, **not a provider-enforced spending cap or invoice**. Usage exceeding a reservation or changed provider pricing can exceed the configured allowance. The next request then stops. Account activity outside this journal is not counted.
-
-The runner sends one request at a time, at most once per second, and never automatically retries. After an HTTP error, invalid response or uncertain network outcome, it stops. A restart reuses completed responses but does not blindly redispatch the failed request.
-
-Inspect the attempt before authorizing another call:
+There are no automatic paid retries. On failure, new dispatches stop when the coordinator observes it; already-started calls finish and their usage/responses are saved. Other successful records are published. Unknown outcomes retain their reservations and block that exact request until explicitly authorized:
 
 ```sh
 sqlite-utils decisions.sqlite \
-  "select id, request_hash, outcome, http_status, error, request_id from attempts order by id"
+  "select id, request_hash, outcome, http_status, error from attempts order by id"
 sqlite-utils jev retry decisions.sqlite REQUEST_HASH
 ```
 
-Then repeat `classify`. `retry` authorizes one additional attempt for that exact request and retains the earlier charge/reservation. The first call may already have been billed. For a rate-limit response, wait for the provider's limit to clear; there is no automatic backoff loop. A crash after receiving and saving a valid response can recover from that response without redispatch.
+Inspect the failure, then repeat classification. Permission allows one additional attempt and keeps the earlier cost/reservation. A timeout may already have been billed. After a rate-limit error, wait before authorizing a retry. Dispatch pacing also limits starts to 18 requests/second and estimates to 200,000 input tokens in a rolling second; these are local limits, not a guarantee about your account's current [provider limits](https://docs.typesafe.ai/models).
 
-## Python API
+A graceful interrupt or application callback exception drains already-started requests and saves their responses; rerun to publish any remaining results. A hard process kill can leave pending reservations that require inspection and explicit retry. No in-memory queue survives process exit.
+
+## Python
 
 ```python
-import json
-from pathlib import Path
-from sqlite_utils_jev import classify_table, status
+from sqlite_utils_jev import classify_table
 
 summary = classify_table(
-    "tickets.db", "tickets",
-    key="id",
-    text_columns=["subject", "body"],
-    question=json.loads(Path("examples/routing.json").read_text()),
-    state="decisions.sqlite",
-    budget_usd="1.00",
+    "tickets.db", "tickets", key="id", text_columns=["subject", "body"],
+    questions=questions,  # A map like the JSON above; or pass question= for one.
+    state="decisions.sqlite", budget_usd="1.00", workers=8,
+    progress=lambda update: print(update["rows"], update["total"]),
 )
-print(summary)
-print(status("decisions.sqlite"))
 ```
 
-For scripts that already have records:
+For records already in Python, use `with Client("decisions.sqlite", budget_usd="1.00") as client:` and call `client.evaluate_questions(state, questions)`. It returns `request_hash`, `answers` and `cached`. The original `client.evaluate(state, question)` returns a single `answer`. These direct calls are synchronous and do not write table results. Direct-call state is a nonempty JSON object and may include structured metadata such as arrays. SQLite table calls select text/null columns. Use a Client from one calling thread; the table runner owns its HTTP workers internally.
 
-```python
-from sqlite_utils_jev import Client
+## Limits and development
 
-with Client("script-decisions.sqlite", budget_usd="1.00") as client:
-    result = client.evaluate(
-        {"body": "Please refund this duplicate charge."},
-        {
-            "type": "choice",
-            "instructions": "Does this message request a refund?",
-            "criteria": {"yes": "Explicit refund request", "no": "No refund request"},
-        },
-    )
-    print(result["answer"], result["cached"])
-```
-
-`Client.evaluate()` saves requests/responses but does not populate table results or apply acceptance thresholds. `classify_table()` adds those behaviors. `Client` must be used as a context manager, from one thread at a time. Both interfaces read the key from `TYPESAFE_API_KEY` or accept `api_key=` explicitly. The package does not read project-specific key files.
-
-## Deliberate limits
-
-- One local process per journal, enforced by an OS file lock. macOS/Linux only; no background jobs or distributed workers. Use one canonical journal path on a local filesystem, not hard-link aliases or network storage.
-- Source selections are loaded into memory before API calls so source-database locks are released. Intended for small and medium jobs, not warehouse-scale scans.
-- One Choice question per row; multiple selected text columns share that row's state. No SQL UDFs, multi-row packing, arbitrary-query runner or alternate provider endpoints.
-- Serialized requests above 24,000 bytes are rejected without truncation. Preprocess long documents yourself; this package does not perform passage extraction.
-- Requests and responses can contain sensitive source text. New journal and lock files use mode 0600; protect their backups. The key itself is not persisted. There is no automatic retention deletion.
-- No live API smoke test or paid benchmark has been run for this preview. Tests demonstrate software behavior with synthetic responses, not JEV's classification accuracy.
-
-## Development
+- Selections are loaded into memory and fully checked for oversized requests before paid work. The 24,000-byte request limit rejects long records without truncation. Intended for small and medium jobs.
+- Use one canonical journal path on a local filesystem, not hard-link aliases or network storage. New journal/lock files use mode 0600. Raw inputs and responses may contain sensitive text; protect backups. Credentials are not persisted.
+- Original v1/v2 journals upgrade automatically, retaining spending, caches and results. v1 rows with unknown key-column names keep `source_key_column=''`. v4 adds `question_name`; older package versions refuse it. The closed experimental batching branch's v3 journals are intentionally unsupported; they must not be silently treated as isolated records.
+- A controlled live check completed 100 unchanged Peptides requests (400 answers), costing about $0.00821 in reported usage. Choices agreed with earlier saved responses 94.5% of the time; this measures repeat-run agreement, not accuracy. See [VALIDATION.md](VALIDATION.md) for the sample, limitations and adversarial review.
 
 ```sh
 python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-Tests make no external model calls. They cover interruption/resume, actual subprocess crashes and locking, duplicate content, failed responses, budgets, thresholds, source preservation and the installed plugin. The included CI workflow runs tests only; it does not publish packages.
-
-Adapted from operational lessons in a Python/SQLite research application. Independent of TypeSafe, MotherDuck and sqlite-utils. The [TypeSafe API](https://docs.typesafe.ai/api) and [sqlite-utils plugin API](https://sqlite-utils.datasette.io/en/stable/plugins.html) define the external interfaces.
+Tests make no external calls. CI runs on Linux/macOS with Python 3.10, 3.12 and 3.14. Independent of TypeSafe, MotherDuck and sqlite-utils. Adapted from operational lessons in a Python/SQLite research application; this package is not yet a production replacement for that application's client.

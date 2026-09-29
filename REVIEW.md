@@ -1,3 +1,5 @@
+> Historical review of the original single-question release. See [VALIDATION.md](VALIDATION.md) for the current concurrency change.
+
 # Design and review notes
 
 This is the standalone sqlite-utils-jev package, extracted and reviewed before its initial GitHub publication. It has no runtime dependency on the parent application. No PyPI release has been published.

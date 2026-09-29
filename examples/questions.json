@@ -1,0 +1,12 @@
+{
+  "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this ticket?",
+    "criteria": {"billing": "Payments and refunds", "technical": "Bugs and outages"}
+  },
+  "urgency": {
+    "type": "choice",
+    "instructions": "Does this ticket explicitly require urgent action?",
+    "criteria": {"urgent": "Explicit urgency", "normal": "No explicit urgency"}
+  }
+}

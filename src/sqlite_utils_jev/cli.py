@@ -10,6 +10,7 @@ import sqlite_utils
 
 from .client import MODEL, PRICE, JevError, allow_retry, set_budget, status
 from .pipeline import classify_table
+from .validation import response_json
 
 
 def errors(fn):
@@ -32,7 +33,10 @@ def jev():
 @click.argument("table")
 @click.option("--key", required=True, help="Unique, non-null integer or text column.")
 @click.option("--text", "text_columns", multiple=True, required=True, help="Text column to send; repeat for multiple columns.")
-@click.option("--question", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True, help="JSON Choice question.")
+@click.option("--question", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="JSON containing one Choice question.")
+@click.option("--questions", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="JSON mapping names to Choice questions.")
+@click.option("--workers", type=click.IntRange(1, 16), default=8, show_default=True, help="Maximum concurrent requests; each contains one record.")
+@click.option("--quiet", is_flag=True, help="Suppress progress on stderr.")
 @click.option("--state", type=click.Path(dir_okay=False, path_type=Path), required=True, help="Separate SQLite journal and results file.")
 @click.option("--budget-usd", help="Initial total allowance, shared by all runs using this state file.")
 @click.option("--model", default=MODEL, show_default=True)
@@ -42,10 +46,19 @@ def jev():
 @click.option("--limit", type=click.IntRange(min=1), help="Process the first N rows ordered by key.")
 @click.option("--offline", is_flag=True, help="Reuse saved answers only; fail on a cache miss.")
 @errors
-def classify(database, table, question, text_columns, **kwargs):
+def classify(database, table, question, questions, text_columns, quiet, **kwargs):
     """Classify a table or view. Repeat the command to resume."""
+    def progress(update):
+        click.echo(f"{update['rows']}/{update['total']} rows | {update['cached_rows']} cached rows | "
+                   f"{update['requests']} requests | ${update['accounted_usd']:.6f} accounted "
+                   f"(includes reservations) | {update['remaining']} remaining", err=True)
+
+    if (question is None) == (questions is None):
+        raise JevError("Supply exactly one of --question or --questions")
+    selected = {"question" if question is not None else "questions":
+                response_json((question or questions).read_text(encoding="utf-8"))}
     result = classify_table(database, table, text_columns=list(text_columns),
-                            question=json.loads(question.read_text(encoding="utf-8")), **kwargs)
+                            progress=None if quiet else progress, **selected, **kwargs)
     click.echo(json.dumps(result, indent=2))
 
 
